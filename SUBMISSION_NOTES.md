@@ -19,4 +19,4 @@
 - Check `available + held + confirmed == total` before and after load.
 
 ## Interview point to remember
-The key answer is not “I checked whether the seat was free.” The key answer is: **“The database transaction takes row locks on the requested seats in deterministic order and performs the state transition before commit; therefore the check and mutation are serialized by PostgreSQL.”**
+The key answer is not “I checked whether the seat was free.” The key answer is: **“The InnoDB transaction takes row locks on the requested seats in deterministic order and performs the state transition before commit; therefore the check and mutation are serialized by MySQL.”**

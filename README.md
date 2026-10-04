@@ -4,11 +4,11 @@ Paytm Money Backend Engineering take-home exercise: a concurrency-safe JSON API 
 
 ## Design in one minute
 
-- **Java 21 + Spring Boot 3.5 + PostgreSQL 16**.
+- **Java 21 + Spring Boot 3.5 + MySQL 8.0 (InnoDB)**.
 - **All-or-nothing** multi-seat requests.
 - Seats are rows in `show_seats`; a reservation locks requested seats with `SELECT ... FOR UPDATE` in deterministic lexical order.
-- A **PostgreSQL transaction** owns the complete decision: lock -> validate -> insert reservation -> mark seats -> persist idempotency key -> commit.
-- Per-user concurrency is serialized only for the same `(show,user)` using `pg_advisory_xact_lock`, so two users can reserve different seats concurrently.
+- An **InnoDB transaction** owns the complete decision: lock -> validate -> insert reservation -> mark seats -> persist idempotency key -> commit.
+- Per-user concurrency is serialized only for the same `(show,user)` using a persistent `booking_locks` row and `SELECT ... FOR UPDATE`, so two users can reserve different seats concurrently.
 - Idempotency is persisted in `idempotency_keys` with a SHA-256 request fingerprint. A second request with the same key is replayed; a different payload returns `409`.
 - Cancellation locks the reservation and its seat mappings, returns the seats to `available`, and never resurrects a seat belonging to another reservation.
 - Money is `BIGINT` paise throughout; no floating point.
@@ -38,11 +38,11 @@ curl -X POST "$BASE/reservations/$RESERVATION_ID/cancel" -H 'Authorization: Bear
 
 ### State
 `GET /shows/{id}` returns every seat plus counts. The invariant is:
-`available + confirmed == total_seats`.
+`available + held + confirmed == total_seats` (this implementation has no timed-held state, so `held` is always 0).
 
 ### Health
 - `GET /health/live`: process liveness; no DB dependency.
-- `GET /health/ready`: executes `SELECT 1`; fails if PostgreSQL is unavailable.
+- `GET /health/ready`: executes `SELECT 1`; fails if MySQL is unavailable.
 - Spring Actuator health/probes are also enabled.
 
 ## Database schema
@@ -53,17 +53,18 @@ See `src/main/resources/schema.sql`. Core tables:
 - `reservations`: reservation ownership, amount, lifecycle.
 - `reservation_seats`: active reservation-to-seat mapping.
 - `idempotency_keys`: unique `(show_id,user_id,idempotency_key)` plus request hash.
+- `booking_locks`: one persistent lock row per `(show_id,user_id)` used only for transaction-scoped per-user serialization.
 
 ## Concurrency correctness
 
 ### Hot seat
-500 users can lock `A12` concurrently. PostgreSQL grants the row lock to one transaction first. That transaction changes `available -> confirmed` before commit. Other transactions then observe `confirmed` and return `409 SEAT_TAKEN`. There is no read-then-write gap.
+500 users can lock `A12` concurrently. InnoDB grants the row lock to one transaction first. That transaction changes `available -> confirmed` before commit. Other transactions then observe `confirmed` and return `409 SEAT_TAKEN`. There is no read-then-write gap.
 
 ### Multiple seats / deadlock avoidance
 The requested seat list is sorted before locking. Every reservation therefore locks seats in the same global order. This prevents two transactions requesting overlapping seat sets in opposite order from forming a lock cycle. The API uses **all-or-nothing** semantics: if any requested seat is unavailable, no seat is changed.
 
 ### Per-user limit
-`pg_advisory_xact_lock(hashtextextended(show_id + user_id, 0))` serializes only concurrent bookings for the same user and show. The service then counts active reserved seats while holding that lock. Different users do not wait on this application-level lock.
+A `booking_locks(show_id,user_id)` row is created with `INSERT IGNORE`, then locked with `SELECT ... FOR UPDATE`. The lock is held until the current InnoDB transaction commits/rolls back. The service counts active reserved seats while holding that lock. Different users do not wait on this application-level lock.
 
 ### Idempotency
 The first request stores the canonical sorted seat list fingerprint and reservation ID. A retry returns the original reservation. If the same key is sent with different seats, the fingerprint differs and the API returns `409 IDEMPOTENCY_CONFLICT`. The idempotency row is committed in the same DB transaction as the reservation, so a successful booking cannot exist without its key record.
@@ -86,15 +87,15 @@ mvn clean package
 
 ## Railway deployment
 
-Deploy the repository with the included `Dockerfile` and `railway.toml`. Add a PostgreSQL service. Configure the application with a JDBC datasource, for example:
+Deploy the repository with the included `Dockerfile` and `railway.toml`. Add a MySQL 8 service/plugin. Configure the application with a JDBC datasource, for example:
 
 ```text
-SPRING_DATASOURCE_URL=jdbc:postgresql://${PGHOST}:${PGPORT}/${PGDATABASE}
-DB_USER=${PGUSER}
-DB_PASSWORD=${PGPASSWORD}
+SPRING_DATASOURCE_URL=jdbc:mysql://${MYSQLHOST}:${MYSQLPORT}/${MYSQLDATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectionCollation=utf8mb4_0900_ai_ci
+DB_USER=${MYSQLUSER}
+DB_PASSWORD=${MYSQLPASSWORD}
 ```
 
-Railway supplies the PostgreSQL variables when the database service is linked. The container listens on Railway's `PORT` and uses `/health/ready` as its health check.
+Use the exact MySQL connection variables provided by your Railway MySQL service. The application does not depend on database-specific Railway variable names. The container listens on Railway's `PORT` and uses `/health/ready` as its health check.
 
 ## Burst test
 
@@ -140,7 +141,7 @@ For seat ownership, **consistency wins**. During a database partition or unavail
 
 ## AI usage disclosure
 
-AI was used as an engineering copilot for project scaffolding, API/README drafting, test/burst-script generation, and review of concurrency edge cases. The final design decisions—PostgreSQL row locking, deterministic lock order, transaction boundaries, idempotency storage/fingerprint, advisory-lock scope, cancellation semantics, and operational checks—were reviewed and are documented here so they can be explained and extended during the interview.
+AI was used as an engineering copilot for project scaffolding, API/README drafting, test/burst-script generation, and review of concurrency edge cases. The final design decisions—MySQL/InnoDB row locking, deterministic lock order, transaction boundaries, idempotency storage/fingerprint, transaction-scoped per-user lock rows, cancellation semantics, and operational checks—were reviewed and are documented here so they can be explained and extended during the interview.
 
 ## Scope / next steps
 
