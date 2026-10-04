@@ -1,22 +1,24 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: mysql:8.0
     environment:
-      POSTGRES_DB: seatreservation
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
+      MYSQL_DATABASE: seatreservation
+      MYSQL_USER: seatuser
+      MYSQL_PASSWORD: seatpass
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports: ["3306:3306"]
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U postgres -d seatreservation"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u seatuser -pseatpass --silent"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
   app:
     build: .
     environment:
-      DATABASE_URL: jdbc:postgresql://db:5432/seatreservation
-      DB_USER: postgres
-      DB_PASSWORD: postgres
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/seatreservation?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectionCollation=utf8mb4_0900_ai_ci
+      DB_USER: seatuser
+      DB_PASSWORD: seatpass
     ports: ["8080:8080"]
     depends_on:
       db:
